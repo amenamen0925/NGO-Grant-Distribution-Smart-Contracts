@@ -70,14 +70,18 @@
         (deadline uint)
         (beneficiary principal)
     )
-    (ok (map-set Projects { project-id: project-id } {
-        owner: tx-sender,
-        target-amount: target-amount,
-        current-amount: u0,
-        deadline: deadline,
-        status: "active",
-        beneficiary: beneficiary,
-    }))
+    (let ((existing-project (map-get? Projects { project-id: project-id })))
+        (asserts! (is-none existing-project) err-project-exists)
+        (map-set Projects { project-id: project-id } {
+            owner: tx-sender,
+            target-amount: target-amount,
+            current-amount: u0,
+            deadline: deadline,
+            status: "active",
+            beneficiary: beneficiary,
+        })
+        (ok true)
+    )
 )
 
 (define-public (donate
@@ -95,14 +99,16 @@
         (asserts! (is-eq (get status project) "active") err-already-funded)
         (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
         (try! (update-project-amount project-id amount))
-        (map-insert Donations {
-            donor: tx-sender,
-            project-id: project-id,
-        } {
-            amount: amount,
-            timestamp: current-height,
-        })
-        (ok true)
+        (begin
+            (map-insert Donations {
+                donor: tx-sender,
+                project-id: project-id,
+            } {
+                amount: amount,
+                timestamp: current-height,
+            })
+            (ok true)
+        )
     )
 )
 
@@ -130,10 +136,12 @@
     (let ((project (unwrap! (map-get? Projects { project-id: project-id })
             err-project-not-found
         )))
-        (map-set Projects { project-id: project-id }
-            (merge project { current-amount: (+ (get current-amount project) amount) })
+        (begin
+            (map-set Projects { project-id: project-id }
+                (merge project { current-amount: (+ (get current-amount project) amount) })
+            )
+            (ok true)
         )
-        (ok true)
     )
 )
 
@@ -144,10 +152,12 @@
     (let ((project (unwrap! (map-get? Projects { project-id: project-id })
             err-project-not-found
         )))
-        (map-set Projects { project-id: project-id }
-            (merge project { status: new-status })
+        (begin
+            (map-set Projects { project-id: project-id }
+                (merge project { status: new-status })
+            )
+            (ok true)
         )
-        (ok true)
     )
 )
 
@@ -172,15 +182,17 @@
     )
     (let ((milestone-id (get-milestone-count project-id)))
         (asserts! (is-project-owner project-id) err-unauthorized)
-        (map-insert ProjectMilestones {
-            project-id: project-id,
-            milestone-id: milestone-id,
-        } {
-            description: description,
-            target-amount: target-amount,
-            completed: false,
-        })
-        (ok milestone-id)
+        (begin
+            (map-insert ProjectMilestones {
+                project-id: project-id,
+                milestone-id: milestone-id,
+            } {
+                description: description,
+                target-amount: target-amount,
+                completed: false,
+            })
+            (ok milestone-id)
+        )
     )
 )
 
@@ -206,6 +218,168 @@
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
         (var-set minimum-donation new-minimum)
+        (ok true)
+    )
+)
+(define-map CreatorReputation
+    { creator: principal }
+    {
+        total-projects: uint,
+        successful-projects: uint,
+        total-raised: uint,
+        reputation-score: uint,
+        last-updated: uint,
+    }
+)
+
+(define-map ProjectCreators
+    { project-id: uint }
+    { creator: principal }
+)
+
+(define-private (initialize-creator-reputation (creator principal))
+    (begin
+        (if (is-none (map-get? CreatorReputation { creator: creator }))
+            (map-set CreatorReputation { creator: creator } {
+                total-projects: u0,
+                successful-projects: u0,
+                total-raised: u0,
+                reputation-score: u50,
+                last-updated: burn-block-height,
+            })
+            true
+        )
+        (ok true)
+    )
+)
+
+(define-private (update-creator-on-project-creation
+        (project-id uint)
+        (creator principal)
+    )
+    (let ((current-rep (default-to {
+            total-projects: u0,
+            successful-projects: u0,
+            total-raised: u0,
+            reputation-score: u50,
+            last-updated: burn-block-height,
+        }
+            (map-get? CreatorReputation { creator: creator })
+        )))
+        (begin
+            (unwrap! (initialize-creator-reputation creator) err-unauthorized)
+            (map-set ProjectCreators { project-id: project-id } { creator: creator })
+            (map-set CreatorReputation { creator: creator }
+                (merge current-rep {
+                    total-projects: (+ (get total-projects current-rep) u1),
+                    last-updated: burn-block-height,
+                })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-private (update-creator-on-project-success
+        (project-id uint)
+        (amount-raised uint)
+    )
+    (let (
+            (creator-data (unwrap! (map-get? ProjectCreators { project-id: project-id })
+                err-project-not-found
+            ))
+            (creator (get creator creator-data))
+            (current-rep (unwrap! (map-get? CreatorReputation { creator: creator })
+                err-project-not-found
+            ))
+            (new-successful (+ (get successful-projects current-rep) u1))
+            (new-total-raised (+ (get total-raised current-rep) amount-raised))
+            (success-rate (/ (* new-successful u100) (get total-projects current-rep)))
+            (new-score (+ u50 (/ success-rate u2)))
+        )
+        (map-set CreatorReputation { creator: creator }
+            (merge current-rep {
+                successful-projects: new-successful,
+                total-raised: new-total-raised,
+                reputation-score: (if (> new-score u100)
+                    u100
+                    new-score
+                ),
+                last-updated: burn-block-height,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-creator-reputation (creator principal))
+    (map-get? CreatorReputation { creator: creator })
+)
+
+(define-read-only (get-creator-success-rate (creator principal))
+    (let ((rep (map-get? CreatorReputation { creator: creator })))
+        (match rep
+            reputation-data (if (> (get total-projects reputation-data) u0)
+                (/ (* (get successful-projects reputation-data) u100)
+                    (get total-projects reputation-data)
+                )
+                u0
+            )
+            u0
+        )
+    )
+)
+
+(define-read-only (is-creator-trusted (creator principal))
+    (let ((rep (map-get? CreatorReputation { creator: creator })))
+        (match rep
+            reputation-data (and
+                (>= (get reputation-score reputation-data) u70)
+                (>= (get total-projects reputation-data) u3)
+            )
+            false
+        )
+    )
+)
+
+(define-public (get-top-creators (limit uint))
+    (begin
+        (asserts! (<= limit u10) err-invalid-amount)
+        (ok "Feature requires off-chain indexing for full implementation")
+    )
+)
+(define-public (create-project-with-reputation
+        (target-amount uint)
+        (deadline uint)
+        (beneficiary principal)
+    )
+    (let ((project-id (get-project-count)))
+        (asserts! (> target-amount u0) err-invalid-amount)
+        (asserts! (> deadline burn-block-height) err-invalid-amount)
+        (try! (create-new-project project-id target-amount deadline beneficiary))
+        (begin
+            (map-set ProjectCreators { project-id: project-id } { creator: tx-sender })
+            true
+        )
+        (var-set project-count (+ (var-get project-count) u1))
+        (ok project-id)
+    )
+)
+
+(define-public (release-funds-with-reputation (project-id uint))
+    (let (
+            (project (unwrap! (map-get? Projects { project-id: project-id })
+                err-project-not-found
+            ))
+            (current-amount (get current-amount project))
+            (target-amount (get target-amount project))
+            (beneficiary (get beneficiary project))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+        (asserts! (>= current-amount target-amount) err-goal-not-met)
+        (try! (as-contract (stx-transfer? current-amount tx-sender beneficiary)))
+        (try! (update-project-status project-id "completed"))
+        (try! (update-creator-on-project-success project-id current-amount))
         (ok true)
     )
 )
