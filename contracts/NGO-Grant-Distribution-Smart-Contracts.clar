@@ -62,7 +62,9 @@
         (asserts! (> target-amount u0) err-invalid-amount)
         (asserts! (> deadline burn-block-height) err-invalid-amount)
         (asserts! (is-valid-category category) err-invalid-category)
-        (try! (create-new-project-with-category project-id target-amount deadline beneficiary category))
+        (try! (create-new-project-with-category project-id target-amount deadline
+            beneficiary category
+        ))
         (var-set project-count (+ (var-get project-count) u1))
         (ok project-id)
     )
@@ -363,7 +365,9 @@
         (asserts! (> target-amount u0) err-invalid-amount)
         (asserts! (> deadline burn-block-height) err-invalid-amount)
         (asserts! (is-valid-category category) err-invalid-category)
-        (try! (create-new-project-with-category project-id target-amount deadline beneficiary category))
+        (try! (create-new-project-with-category project-id target-amount deadline
+            beneficiary category
+        ))
         (begin
             (map-set ProjectCreators { project-id: project-id } { creator: tx-sender })
             true
@@ -468,5 +472,6 @@
 )
 
 (define-read-only (get-valid-categories)
-    (list "education" "healthcare" "environment" "poverty" "disaster-relief" "technology" "general")
+    (list "education" "healthcare" "environment" "poverty" "disaster-relief"
+        "technology" "general")
 )
