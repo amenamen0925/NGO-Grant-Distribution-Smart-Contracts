@@ -472,6 +472,9 @@
 )
 
 (define-read-only (get-valid-categories)
-    (list "education" "healthcare" "environment" "poverty" "disaster-relief"
-        "technology" "general")
+    (list
+        "education"         "healthcare"         "environment"         "poverty"
+        "disaster-relief"
+        "technology"         "general"
+    )
 )
