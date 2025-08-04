@@ -5,6 +5,7 @@
 (define-constant err-project-not-found (err u103))
 (define-constant err-goal-not-met (err u104))
 (define-constant err-already-funded (err u105))
+(define-constant err-invalid-category (err u106))
 
 (define-data-var minimum-donation uint u1000)
 (define-data-var platform-fee uint u25)
@@ -18,6 +19,7 @@
         deadline: uint,
         status: (string-ascii 20),
         beneficiary: principal,
+        category: (string-ascii 20),
     }
 )
 
@@ -54,11 +56,13 @@
         (target-amount uint)
         (deadline uint)
         (beneficiary principal)
+        (category (string-ascii 20))
     )
     (let ((project-id (get-project-count)))
         (asserts! (> target-amount u0) err-invalid-amount)
         (asserts! (> deadline burn-block-height) err-invalid-amount)
-        ;; (try! (create-new-project project-id target-amount deadline beneficiary))
+        (asserts! (is-valid-category category) err-invalid-category)
+        (try! (create-new-project-with-category project-id target-amount deadline beneficiary category))
         (var-set project-count (+ (var-get project-count) u1))
         (ok project-id)
     )
@@ -79,6 +83,7 @@
             deadline: deadline,
             status: "active",
             beneficiary: beneficiary,
+            category: "general",
         })
         (ok true)
     )
@@ -352,11 +357,13 @@
         (target-amount uint)
         (deadline uint)
         (beneficiary principal)
+        (category (string-ascii 20))
     )
     (let ((project-id (get-project-count)))
         (asserts! (> target-amount u0) err-invalid-amount)
         (asserts! (> deadline burn-block-height) err-invalid-amount)
-        (try! (create-new-project project-id target-amount deadline beneficiary))
+        (asserts! (is-valid-category category) err-invalid-category)
+        (try! (create-new-project-with-category project-id target-amount deadline beneficiary category))
         (begin
             (map-set ProjectCreators { project-id: project-id } { creator: tx-sender })
             true
@@ -382,4 +389,84 @@
         (try! (update-creator-on-project-success project-id current-amount))
         (ok true)
     )
+)
+
+(define-map ProjectCategories
+    { category: (string-ascii 20) }
+    {
+        project-count: uint,
+        total-funding: uint,
+        last-updated: uint,
+    }
+)
+
+(define-private (is-valid-category (category (string-ascii 20)))
+    (or
+        (is-eq category "education")
+        (is-eq category "healthcare")
+        (is-eq category "environment")
+        (is-eq category "poverty")
+        (is-eq category "disaster-relief")
+        (is-eq category "technology")
+        (is-eq category "general")
+    )
+)
+
+(define-private (create-new-project-with-category
+        (project-id uint)
+        (target-amount uint)
+        (deadline uint)
+        (beneficiary principal)
+        (category (string-ascii 20))
+    )
+    (let ((existing-project (map-get? Projects { project-id: project-id })))
+        (asserts! (is-none existing-project) err-project-exists)
+        (begin
+            (map-set Projects { project-id: project-id } {
+                owner: tx-sender,
+                target-amount: target-amount,
+                current-amount: u0,
+                deadline: deadline,
+                status: "active",
+                beneficiary: beneficiary,
+                category: category,
+            })
+            (update-category-stats category)
+            (ok true)
+        )
+    )
+)
+
+(define-private (update-category-stats (category (string-ascii 20)))
+    (let ((current-stats (default-to {
+            project-count: u0,
+            total-funding: u0,
+            last-updated: burn-block-height,
+        }
+            (map-get? ProjectCategories { category: category })
+        )))
+        (map-set ProjectCategories { category: category }
+            (merge current-stats {
+                project-count: (+ (get project-count current-stats) u1),
+                last-updated: burn-block-height,
+            })
+        )
+    )
+)
+
+(define-read-only (get-category-stats (category (string-ascii 20)))
+    (map-get? ProjectCategories { category: category })
+)
+
+(define-read-only (get-projects-by-category (category (string-ascii 20)))
+    (let ((stats (map-get? ProjectCategories { category: category })))
+        (match stats
+            category-data (get project-count category-data)
+            u0
+        )
+    )
+)
+
+(define-read-only (get-valid-categories)
+    (list "education" "healthcare" "environment" "poverty" "disaster-relief" "technology" "general")
 )
