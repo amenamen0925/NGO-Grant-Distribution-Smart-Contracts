@@ -6,6 +6,8 @@
 (define-constant err-goal-not-met (err u104))
 (define-constant err-already-funded (err u105))
 (define-constant err-invalid-category (err u106))
+(define-constant err-refund-not-available (err u107))
+(define-constant err-already-refunded (err u108))
 
 (define-data-var minimum-donation uint u1000)
 (define-data-var platform-fee uint u25)
@@ -31,6 +33,7 @@
     {
         amount: uint,
         timestamp: uint,
+        refunded: bool,
     }
 )
 
@@ -113,6 +116,7 @@
             } {
                 amount: amount,
                 timestamp: current-height,
+                refunded: false,
             })
             (ok true)
         )
@@ -476,5 +480,139 @@
         "education"         "healthcare"         "environment"         "poverty"
         "disaster-relief"
         "technology"         "general"
+    )
+)
+
+(define-public (request-refund (project-id uint))
+    (let (
+            (project (unwrap! (map-get? Projects { project-id: project-id })
+                err-project-not-found
+            ))
+            (donation (unwrap!
+                (map-get? Donations {
+                    donor: tx-sender,
+                    project-id: project-id,
+                })
+                err-project-not-found
+            ))
+            (current-height burn-block-height)
+        )
+        (asserts! (is-refund-eligible project-id) err-refund-not-available)
+        (asserts! (not (get refunded donation)) err-already-refunded)
+        (try! (as-contract (stx-transfer? (get amount donation) tx-sender tx-sender)))
+        (try! (process-refund project-id tx-sender donation))
+        (ok true)
+    )
+)
+
+(define-private (is-refund-eligible (project-id uint))
+    (let ((project (unwrap! (map-get? Projects { project-id: project-id }) false)))
+        (or
+            (and
+                (> burn-block-height (get deadline project))
+                (< (get current-amount project) (get target-amount project))
+            )
+            (is-eq (get status project) "cancelled")
+            (is-eq (get status project) "failed")
+        )
+    )
+)
+
+(define-private (process-refund
+        (project-id uint)
+        (donor principal)
+        (donation {
+            amount: uint,
+            timestamp: uint,
+            refunded: bool,
+        })
+    )
+    (begin
+        (map-set Donations {
+            donor: donor,
+            project-id: project-id,
+        }
+            (merge donation { refunded: true })
+        )
+        (try! (reduce-project-amount project-id (get amount donation)))
+        (ok true)
+    )
+)
+
+(define-private (reduce-project-amount
+        (project-id uint)
+        (amount uint)
+    )
+    (let ((project (unwrap! (map-get? Projects { project-id: project-id })
+            err-project-not-found
+        )))
+        (begin
+            (map-set Projects { project-id: project-id }
+                (merge project { current-amount: (if (>= (get current-amount project) amount)
+                    (- (get current-amount project) amount)
+                    u0
+                ) }
+                ))
+            (ok true)
+        )
+    )
+)
+
+(define-public (mark-project-failed (project-id uint))
+    (let ((project (unwrap! (map-get? Projects { project-id: project-id })
+            err-project-not-found
+        )))
+        (asserts! (is-eq tx-sender contract-owner) err-unauthorized)
+        (asserts! (not (is-eq (get status project) "completed"))
+            err-already-funded
+        )
+        (try! (update-project-status project-id "failed"))
+        (ok true)
+    )
+)
+
+(define-read-only (get-refund-eligibility
+        (project-id uint)
+        (donor principal)
+    )
+    (let (
+            (donation (map-get? Donations {
+                donor: donor,
+                project-id: project-id,
+            }))
+            (project (map-get? Projects { project-id: project-id }))
+        )
+        (match donation
+            donation-data (match project
+                project-data
+                {
+                    eligible: (is-refund-eligible project-id),
+                    already-refunded: (get refunded donation-data),
+                    amount: (get amount donation-data),
+                }
+                {
+                    eligible: false,
+                    already-refunded: false,
+                    amount: u0,
+                }
+            )
+            {
+                eligible: false,
+                already-refunded: false,
+                amount: u0,
+            }
+        )
+    )
+)
+
+(define-read-only (get-total-refundable-amount (project-id uint))
+    (let ((project (map-get? Projects { project-id: project-id })))
+        (match project
+            project-data (if (is-refund-eligible project-id)
+                (get current-amount project-data)
+                u0
+            )
+            u0
+        )
     )
 )
