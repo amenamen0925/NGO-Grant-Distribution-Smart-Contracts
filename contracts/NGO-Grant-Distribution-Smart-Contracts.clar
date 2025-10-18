@@ -8,6 +8,9 @@
 (define-constant err-invalid-category (err u106))
 (define-constant err-refund-not-available (err u107))
 (define-constant err-already-refunded (err u108))
+(define-constant err-insufficient-match-pool (err u109))
+(define-constant err-match-pool-exists (err u110))
+(define-constant err-match-pool-not-found (err u111))
 
 (define-data-var minimum-donation uint u1000)
 (define-data-var platform-fee uint u25)
@@ -613,6 +616,234 @@
                 u0
             )
             u0
+        )
+    )
+)
+
+(define-map MatchingPools
+    { pool-id: uint }
+    {
+        sponsor: principal,
+        project-id: uint,
+        total-pool: uint,
+        remaining-pool: uint,
+        match-ratio: uint,
+        max-match-per-donation: uint,
+        active: bool,
+    }
+)
+
+(define-map MatchingHistory
+    {
+        pool-id: uint,
+        donor: principal,
+    }
+    {
+        matched-amount: uint,
+        original-donation: uint,
+        timestamp: uint,
+    }
+)
+
+(define-data-var match-pool-count uint u0)
+
+(define-public (create-matching-pool
+        (project-id uint)
+        (pool-amount uint)
+        (match-ratio uint)
+        (max-match-per-donation uint)
+    )
+    (let (
+            (pool-id (var-get match-pool-count))
+            (project (unwrap! (map-get? Projects { project-id: project-id })
+                err-project-not-found
+            ))
+        )
+        (asserts! (> pool-amount u0) err-invalid-amount)
+        (asserts! (> match-ratio u0) err-invalid-amount)
+        (asserts! (<= match-ratio u200) err-invalid-amount)
+        (try! (stx-transfer? pool-amount tx-sender (as-contract tx-sender)))
+        (map-set MatchingPools { pool-id: pool-id } {
+            sponsor: tx-sender,
+            project-id: project-id,
+            total-pool: pool-amount,
+            remaining-pool: pool-amount,
+            match-ratio: match-ratio,
+            max-match-per-donation: max-match-per-donation,
+            active: true,
+        })
+        (var-set match-pool-count (+ pool-id u1))
+        (ok pool-id)
+    )
+)
+
+(define-public (donate-with-matching
+        (project-id uint)
+        (amount uint)
+        (pool-id uint)
+    )
+    (let (
+            (project (unwrap! (map-get? Projects { project-id: project-id })
+                err-project-not-found
+            ))
+            (pool (unwrap! (map-get? MatchingPools { pool-id: pool-id })
+                err-match-pool-not-found
+            ))
+            (current-height burn-block-height)
+        )
+        (asserts! (>= amount (var-get minimum-donation)) err-invalid-amount)
+        (asserts! (< current-height (get deadline project)) err-goal-not-met)
+        (asserts! (is-eq (get status project) "active") err-already-funded)
+        (asserts! (is-eq (get project-id pool) project-id)
+            err-match-pool-not-found
+        )
+        (asserts! (get active pool) err-match-pool-not-found)
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (let ((match-amount (calculate-match-amount amount pool)))
+            (if (> match-amount u0)
+                (try! (process-matching pool-id tx-sender amount match-amount))
+                true
+            )
+            (try! (update-project-amount project-id (+ amount match-amount)))
+            (begin
+                (map-insert Donations {
+                    donor: tx-sender,
+                    project-id: project-id,
+                } {
+                    amount: (+ amount match-amount),
+                    timestamp: current-height,
+                    refunded: false,
+                })
+                (ok {
+                    donation: amount,
+                    matched: match-amount,
+                    total: (+ amount match-amount),
+                })
+            )
+        )
+    )
+)
+
+(define-private (calculate-match-amount
+        (donation-amount uint)
+        (pool {
+            sponsor: principal,
+            project-id: uint,
+            total-pool: uint,
+            remaining-pool: uint,
+            match-ratio: uint,
+            max-match-per-donation: uint,
+            active: bool,
+        })
+    )
+    (let (
+            (potential-match (/ (* donation-amount (get match-ratio pool)) u100))
+            (capped-match (if (> potential-match (get max-match-per-donation pool))
+                (get max-match-per-donation pool)
+                potential-match
+            ))
+        )
+        (if (>= (get remaining-pool pool) capped-match)
+            capped-match
+            (get remaining-pool pool)
+        )
+    )
+)
+
+(define-private (process-matching
+        (pool-id uint)
+        (donor principal)
+        (original-amount uint)
+        (match-amount uint)
+    )
+    (let ((pool (unwrap! (map-get? MatchingPools { pool-id: pool-id })
+            err-match-pool-not-found
+        )))
+        (begin
+            (map-set MatchingPools { pool-id: pool-id }
+                (merge pool { remaining-pool: (- (get remaining-pool pool) match-amount) })
+            )
+            (map-insert MatchingHistory {
+                pool-id: pool-id,
+                donor: donor,
+            } {
+                matched-amount: match-amount,
+                original-donation: original-amount,
+                timestamp: burn-block-height,
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-public (deactivate-matching-pool (pool-id uint))
+    (let ((pool (unwrap! (map-get? MatchingPools { pool-id: pool-id })
+            err-match-pool-not-found
+        )))
+        (asserts! (is-eq tx-sender (get sponsor pool)) err-unauthorized)
+        (map-set MatchingPools { pool-id: pool-id }
+            (merge pool { active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-public (withdraw-remaining-match-pool (pool-id uint))
+    (let ((pool (unwrap! (map-get? MatchingPools { pool-id: pool-id })
+            err-match-pool-not-found
+        )))
+        (asserts! (is-eq tx-sender (get sponsor pool)) err-unauthorized)
+        (asserts! (not (get active pool)) err-match-pool-exists)
+        (asserts! (> (get remaining-pool pool) u0) err-invalid-amount)
+        (try! (as-contract (stx-transfer? (get remaining-pool pool) tx-sender (get sponsor pool))))
+        (map-set MatchingPools { pool-id: pool-id }
+            (merge pool { remaining-pool: u0 })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-matching-pool-details (pool-id uint))
+    (map-get? MatchingPools { pool-id: pool-id })
+)
+
+(define-read-only (get-matching-history
+        (pool-id uint)
+        (donor principal)
+    )
+    (map-get? MatchingHistory {
+        pool-id: pool-id,
+        donor: donor,
+    })
+)
+
+(define-read-only (get-pool-utilization (pool-id uint))
+    (let ((pool (map-get? MatchingPools { pool-id: pool-id })))
+        (match pool
+            pool-data
+            {
+                total: (get total-pool pool-data),
+                used: (- (get total-pool pool-data) (get remaining-pool pool-data)),
+                remaining: (get remaining-pool pool-data),
+                utilization-rate: (if (> (get total-pool pool-data) u0)
+                    (/
+                        (*
+                            (- (get total-pool pool-data)
+                                (get remaining-pool pool-data)
+                            )
+                            u100
+                        )
+                        (get total-pool pool-data)
+                    )
+                    u0
+                ),
+            }
+            {
+                total: u0,
+                used: u0,
+                remaining: u0,
+                utilization-rate: u0,
+            }
         )
     )
 )
