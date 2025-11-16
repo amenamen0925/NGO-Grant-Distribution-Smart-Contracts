@@ -847,3 +847,75 @@
         )
     )
 )
+
+(define-map ProjectUpdateCounters
+    { project-id: uint }
+    { next-id: uint }
+)
+
+(define-map ProjectUpdates
+    {
+        project-id: uint,
+        update-id: uint,
+    }
+    {
+        author: principal,
+        timestamp: uint,
+        content: (string-ascii 200),
+    }
+)
+
+(define-public (post-project-update
+        (project-id uint)
+        (content (string-ascii 200))
+    )
+    (let (
+            (project (unwrap! (map-get? Projects { project-id: project-id })
+                err-project-not-found
+            ))
+            (counter (default-to { next-id: u0 }
+                (map-get? ProjectUpdateCounters { project-id: project-id })
+            ))
+            (update-id (get next-id counter))
+        )
+        (asserts! (is-eq tx-sender (get owner project)) err-unauthorized)
+        (map-set ProjectUpdateCounters { project-id: project-id } { next-id: (+ update-id u1) })
+        (map-insert ProjectUpdates {
+            project-id: project-id,
+            update-id: update-id,
+        } {
+            author: tx-sender,
+            timestamp: burn-block-height,
+            content: content,
+        })
+        (ok {
+            project-id: project-id,
+            update-id: update-id,
+        })
+    )
+)
+
+(define-read-only (get-project-update
+        (project-id uint)
+        (update-id uint)
+    )
+    (map-get? ProjectUpdates {
+        project-id: project-id,
+        update-id: update-id,
+    })
+)
+
+(define-read-only (get-latest-project-update (project-id uint))
+    (let ((counter (map-get? ProjectUpdateCounters { project-id: project-id })))
+        (match counter
+            counter-data (if (> (get next-id counter-data) u0)
+                (map-get? ProjectUpdates {
+                    project-id: project-id,
+                    update-id: (- (get next-id counter-data) u1),
+                })
+                none
+            )
+            none
+        )
+    )
+)
